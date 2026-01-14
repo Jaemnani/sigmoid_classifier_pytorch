@@ -23,7 +23,7 @@ from matplotlib import pyplot as plt
 
 
 class LivePlot:
-    def __init__(self, iterations, interval=20, mean=10, y_min=0.0, y_max=0.2, legend='loss'):
+    def __init__(self, iterations, interval=20, mean=10, y_min=0.0, y_max=0.2, legend='loss', output_file=None):
         plt.style.use(['dark_background'])
         self.fig, self.ax = plt.subplots()
         pad = ((y_max - y_min) * 0.05)
@@ -31,6 +31,7 @@ class LivePlot:
         self.mean = mean
         self.y_min = y_min - pad
         self.y_max = y_max + pad
+        self.output_file = output_file
         self.ax.set_ylim(self.y_min, self.y_max)
         self.data = np.array([None for _ in range(iterations)], dtype=np.float32)
         self.values, = self.ax.plot(np.random.rand(iterations))
@@ -52,7 +53,10 @@ class LivePlot:
         if self.interval_count == self.interval:
             self.interval_count = 0
             self.values.set_ydata(self.data)
-            plt.pause(1e-9)
+            if self.output_file is None:
+                plt.pause(1e-9)
+            else:
+                plt.savefig(self.output_file)
 
     def get_recent_avg_value(self, val):
         if len(self.recent_values) > self.mean:

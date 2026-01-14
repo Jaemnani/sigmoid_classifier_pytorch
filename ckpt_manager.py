@@ -42,6 +42,7 @@ class CheckpointManager:
         self.checkpoint_path = new_checkpoint_path
         self.make_checkpoint_dir()
         print(f'checkpoint path : {self.checkpoint_path}')
+        return self.checkpoint_path
 
     def remove_last_model(self):
         for last_model_path in glob(f'{self.checkpoint_path}/last_*.pt'):

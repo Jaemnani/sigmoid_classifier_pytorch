@@ -52,6 +52,7 @@ class SigmoidClassifier(CheckpointManager):
                  lr_policy='step',
                  checkpoint_interval=0,
                  show_class_activation_map=False,
+                 show_live_plot=False,
                  cam_activation_layer_name='cam_activation',
                  last_conv_layer_name='squeeze_conv'):
         super().__init__()
@@ -67,6 +68,7 @@ class SigmoidClassifier(CheckpointManager):
         self.iterations = iterations
         self.lr_policy = lr_policy 
         self.show_class_activation_map = show_class_activation_map
+        self.show_live_plot = show_live_plot
         self.cam_activation_layer_name = cam_activation_layer_name
         self.last_conv_layer_name = last_conv_layer_name
         self.checkpoint_interval = checkpoint_interval
@@ -121,6 +123,11 @@ class SigmoidClassifier(CheckpointManager):
         # We'll pass (C, H, W) to model constructor just to be safe if it needs channel info 
         model_input_shape = (self.input_shape[2], self.input_shape[0], self.input_shape[1])
         self.model = Model(input_shape=model_input_shape, num_classes=len(self.class_names)).to(device)
+        self.feature_map = None
+        self.model.classifier_conv.register_forward_hook(self.hook)
+
+    def hook(self, module, input, output):
+        self.feature_map = output
 
     def load_model(self, model_path):
         if os.path.exists(model_path) and os.path.isfile(model_path):
@@ -176,8 +183,79 @@ class SigmoidClassifier(CheckpointManager):
         return image_paths, class_names, include_unknown
 
     def draw_cam(self, x, label):
-        # Placeholder for CAM
-        pass
+        self.model.eval()
+        with torch.no_grad():
+            x_tensor = x.unsqueeze(0).to(device)
+            _ = self.model(x_tensor)
+
+        # feature_map shape: (1, C, H, W)
+        # Using the direct output of classifier_conv as CAM
+        # This matches the "weights * features" logic since classifier_conv does exactly that.
+        cam_map = self.feature_map.cpu().numpy()[0] # (C, H, W)
+        
+        img_h, img_w, img_c = self.input_shape
+        x_np = x.permute(1, 2, 0).cpu().numpy() # (C, H, W) -> (H, W, C)
+        
+        if img_c == 1:
+            x_np = np.concatenate([x_np, x_np, x_np], axis=-1)
+        
+        # Denormalize roughly for visualization if needed. 
+        # Assuming input was 0-1.
+        
+        image_grid = None
+        for idx, cls in enumerate(self.class_names):
+            # cam_map[idx] is the heatmap for class idx
+            cam = cam_map[idx] # (H, W) (small size)
+            
+            # Normalize CAM
+            cam -= np.min(cam)
+            if np.max(cam) > 0:
+                cam /= np.max(cam)
+            cam *= 255.0
+            cam = cam.astype(np.uint8)
+            
+            # Resize to image size
+            cam = cv2.resize(cam, (img_w, img_h))
+            
+            # Heatmap color
+            cam_jet = cv2.applyColorMap(cam, cv2.COLORMAP_JET)
+            
+            # Original image (0-1) -> 0-255
+            org_img_uint8 = (x_np * 255.0).astype(np.uint8)
+            if img_c == 1 and org_img_uint8.shape[-1] == 1:
+                 org_img_uint8 = cv2.cvtColor(org_img_uint8, cv2.COLOR_GRAY2BGR)
+            elif img_c == 3:
+                 # PyTorch is RGB, OpenCV is BGR
+                 org_img_uint8 = cv2.cvtColor(org_img_uint8, cv2.COLOR_RGB2BGR)
+
+            # Blend
+            cam_blended = cv2.addWeighted(org_img_uint8, 0.6, cam_jet, 0.4, 0)
+            
+            # Label box logic (simplified)
+            # Create a small bar indicating if this is the label
+            label_indicator = np.zeros((img_h, 10, 3), dtype=np.uint8)
+            if idx == np.argmax(label.cpu().numpy()):
+                label_indicator[:] = (0, 255, 0) # Green for true label
+            
+            # Concatenate: Indicator | Original | Heatmap | Blended
+            row = np.hstack([label_indicator, org_img_uint8, cam_jet, cam_blended])
+            
+            if image_grid is None:
+                image_grid = row
+            else:
+                image_grid = np.vstack([image_grid, row])
+                
+        # Resize for display if too tall
+        max_h = 800
+        if image_grid.shape[0] > max_h:
+            ratio = max_h / image_grid.shape[0]
+            new_w = int(image_grid.shape[1] * ratio)
+            image_grid = cv2.resize(image_grid, (new_w, max_h))
+            
+        cv2.imshow('CAM', image_grid)
+        cv2.waitKey(1)
+        
+        self.model.train()
 
     def print_loss(self, progress_str, loss):
         print(f'\r{progress_str} loss => {loss:.4f}', end='')
@@ -199,12 +277,15 @@ class SigmoidClassifier(CheckpointManager):
         # Scheduler
         lr_scheduler = LRScheduler(lr=self.lr, lrf=self.lrf, iterations=self.iterations, warm_up=self.warm_up, policy=self.lr_policy)
         
-        self.init_checkpoint_dir()
+        self.checkpoint_dir = self.init_checkpoint_dir()
         iteration_count = self.pretrained_iteration_count
         eta_calculator = ETACalculator(iterations=self.iterations, start_iteration=iteration_count)
         eta_calculator.start()
 
-        live_plot = LivePlot(iterations=self.iterations) 
+        if self.show_live_plot:
+            live_plot = LivePlot(iterations=self.iterations)
+        else:
+            live_plot = LivePlot(iterations=self.iterations, output_file=f'{self.checkpoint_dir}/loss_graph.png')
         
         self.model.train()
         
@@ -224,7 +305,8 @@ class SigmoidClassifier(CheckpointManager):
                 loss.backward()
                 optimizer.step()
                 
-                # CAM visualization (omitted for now)
+                if self.show_class_activation_map and iteration_count % 100 == 0:
+                    self.draw_cam(batch_x[0], batch_y[0])
                 
                 iteration_count += 1
                 progress_str = eta_calculator.update(iteration_count)
