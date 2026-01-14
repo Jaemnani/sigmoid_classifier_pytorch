@@ -1,0 +1,330 @@
+
+import os
+import cv2
+import time
+import random
+import warnings
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from glob import glob
+from tqdm import tqdm
+
+from model import Model
+from eta import ETACalculator
+from live_plot import LivePlot
+from dataset import CustomDataset
+from lr_scheduler import LRScheduler
+from ace import AdaptiveCrossentropy
+from ckpt_manager import CheckpointManager
+
+# Set device
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
+# print(f'Device : {device}')
+
+class SigmoidClassifier(CheckpointManager):
+    def __init__(self,
+                 train_image_path,
+                 validation_image_path,
+                 model_name,
+                 input_shape,
+                 lr,
+                 lrf,
+                 alpha,
+                 gamma,
+                 warm_up,
+                 momentum,
+                 batch_size,
+                 iterations,
+                 label_smoothing,
+                 aug_brightness,
+                 aug_contrast,
+                 aug_rotate,
+                 aug_h_flip,
+                 lr_policy='step',
+                 checkpoint_interval=0,
+                 show_class_activation_map=False,
+                 cam_activation_layer_name='cam_activation',
+                 last_conv_layer_name='squeeze_conv'):
+        super().__init__()
+        self.input_shape = input_shape # (H, W, C)
+        self.lr = lr
+        self.lrf = lrf
+        self.warm_up = warm_up
+        self.alpha = alpha
+        self.gamma = gamma
+        self.momentum = momentum
+        self.label_smoothing = label_smoothing
+        self.batch_size = batch_size
+        self.iterations = iterations
+        self.lr_policy = lr_policy 
+        self.show_class_activation_map = show_class_activation_map
+        self.cam_activation_layer_name = cam_activation_layer_name
+        self.last_conv_layer_name = last_conv_layer_name
+        self.checkpoint_interval = checkpoint_interval
+        self.pretrained_iteration_count = 0
+        warnings.filterwarnings(action='ignore')
+        self.set_model_name(model_name)
+        if self.checkpoint_interval == 0:
+            self.checkpoint_interval = self.iterations
+
+        train_image_path = self.unify_path(train_image_path)
+        validation_image_path = self.unify_path(validation_image_path)
+
+        self.train_image_paths, train_class_names, _ = self.init_image_paths(train_image_path)
+        self.validation_image_paths, validation_class_names, self.include_unknown = self.init_image_paths(validation_image_path)
+        
+        if len(self.train_image_paths) == 0:
+            print(f'no images in train_image_path : {train_image_path}')
+            exit(0)
+        if len(self.validation_image_paths) == 0:
+            print(f'no images in validation_image_path : {validation_image_path}')
+            exit(0)
+
+        self.class_names = validation_class_names
+        
+        # Datasets
+        self.train_dataset = CustomDataset(
+            root_path=train_image_path,
+            image_paths=self.train_image_paths,
+            input_shape=self.input_shape,
+            class_names=train_class_names,
+            aug_brightness=aug_brightness,
+            aug_contrast=aug_contrast,
+            aug_rotate=aug_rotate,
+            aug_h_flip=aug_h_flip,
+            is_training=True
+        )
+        
+        self.validation_dataset = CustomDataset(
+            root_path=validation_image_path,
+            image_paths=self.validation_image_paths,
+            input_shape=self.input_shape,
+            class_names=self.class_names,
+            is_training=False
+        )
+
+        # PyTorch DataLoaders
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        self.validation_loader = DataLoader(self.validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        
+        # Model
+        # Input shape in model is expected as (C, H, W) mostly for internals, but constructor takes logic from original which used (H,W,C).
+        # We'll pass (C, H, W) to model constructor just to be safe if it needs channel info 
+        model_input_shape = (self.input_shape[2], self.input_shape[0], self.input_shape[1])
+        self.model = Model(input_shape=model_input_shape, num_classes=len(self.class_names)).to(device)
+
+    def load_model(self, model_path):
+        if os.path.exists(model_path) and os.path.isfile(model_path):
+            self.pretrained_iteration_count = self.parse_pretrained_iteration_count(model_path)
+            state_dict = torch.load(model_path, map_location=device)
+            self.model.load_state_dict(state_dict)
+            print(f'Loaded model from {model_path}')
+        else:
+            print(f'pretrained model not found : {model_path}')
+            exit(0)
+
+    def unify_path(self, path):
+        if path == '':
+            return path
+        path = path.replace('\\', '/')
+        if path.endswith('/'):
+            path = path[:-1]
+        return path
+
+    def init_image_paths(self, image_path):
+        include_unknown = False
+        dir_paths = sorted(glob(f'{image_path}/*'))
+        for i in range(len(dir_paths)):
+            dir_paths[i] = dir_paths[i].replace('\\', '/')
+        image_paths = []
+        class_counts = []
+        class_name_set = set()
+        unknown_class_count = 0
+        print('class image count')
+        for dir_path in dir_paths:
+            if not os.path.isdir(dir_path):
+                continue
+            dir_name = dir_path.split('/')[-1]
+            if dir_name[0] == '_':
+                print(f'class dir {dir_name} is ignored. dir_name[0] == "_"')
+                continue
+            if dir_name == 'unknown':
+                include_unknown = True
+            else:
+                class_name_set.add(dir_name)
+            cur_class_image_paths = glob(f'{dir_path}/**/*.jpg', recursive=True)
+            for i in range(len(cur_class_image_paths)):
+                cur_class_image_paths[i] = cur_class_image_paths[i].replace('\\', '/')
+            image_paths += cur_class_image_paths
+            cur_class_image_count = len(cur_class_image_paths)
+            if dir_name == 'unknown':
+                unknown_class_count = cur_class_image_count
+            else:
+                class_counts.append(cur_class_image_count)
+            print(f'class {dir_name} : {cur_class_image_count}')
+        print()
+        class_names = sorted(list(class_name_set))
+        return image_paths, class_names, include_unknown
+
+    def draw_cam(self, x, label):
+        # Placeholder for CAM
+        pass
+
+    def print_loss(self, progress_str, loss):
+        print(f'\r{progress_str} loss => {loss:.4f}', end='')
+
+    def train(self):
+        if self.pretrained_iteration_count >= self.iterations:
+            print(f'pretrained iteration count {self.pretrained_iteration_count} is greater or equal than target iterations {self.iterations}')
+            exit(0)
+
+        print(f'\ntrain on {len(self.train_image_paths)} samples')
+        print(f'validate on {len(self.validation_image_paths)} samples\n')
+        
+        # Optimizer
+        optimizer = optim.Adam(self.model.parameters(), lr=self.lr, betas=(self.momentum, 0.999))
+        
+        # Loss
+        loss_function = AdaptiveCrossentropy(alpha=self.alpha, gamma=self.gamma, label_smoothing=self.label_smoothing, reduce='sum').to(device)
+        
+        # Scheduler
+        lr_scheduler = LRScheduler(lr=self.lr, lrf=self.lrf, iterations=self.iterations, warm_up=self.warm_up, policy=self.lr_policy)
+        
+        self.init_checkpoint_dir()
+        iteration_count = self.pretrained_iteration_count
+        eta_calculator = ETACalculator(iterations=self.iterations, start_iteration=iteration_count)
+        eta_calculator.start()
+
+        live_plot = LivePlot(iterations=self.iterations) 
+        
+        self.model.train()
+        
+        while True:
+            for batch_x, batch_y in self.train_loader:
+                if iteration_count >= self.iterations:
+                    break
+
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                
+                lr_scheduler.update(optimizer, iteration_count)
+                
+                optimizer.zero_grad()
+                y_pred = self.model(batch_x)
+                loss = loss_function(batch_y, y_pred)
+                loss.backward()
+                optimizer.step()
+                
+                # CAM visualization (omitted for now)
+                
+                iteration_count += 1
+                progress_str = eta_calculator.update(iteration_count)
+                self.print_loss(progress_str, loss.item())
+                
+                live_plot.update(loss.item())
+
+                if iteration_count % 2000 == 0:
+                    self.save_last_model(self.model.state_dict(), iteration_count)
+                    
+                if iteration_count >= int(self.iterations * self.warm_up) and iteration_count % self.checkpoint_interval == 0:
+                    acc, class_score, unknown_score = self.evaluate()
+                    self.model.train() # Set back to train mode
+                    content = f'_acc_{acc:.4f}_class_score_{class_score:.4f}'
+                    if self.include_unknown:
+                        content += f'_unknown_score_{unknown_score:.4f}'
+                    self.save_best_model(self.model.state_dict(), iteration_count, metric=acc, content=content)
+            
+            if iteration_count >= self.iterations:
+                print('\ntrain end successfully')
+                break
+
+    def evaluate(self, dataset='validation', unknown_threshold=0.5):
+        self.model.eval()
+        loader = self.validation_loader if dataset == 'validation' else self.train_loader
+        # Create a separate loader for evaluation if needed to avoid messing up training state logic, 
+        # but standard loaders are fine. For exact parity with original 'one_batch' logic we might want batch_size=1,
+        # but regular batch size is faster and equivalent for metrics.
+        
+        # However, to match the original line-by-line printing style and logic, let's iterate carefully.
+        # Original: batch_size=1
+        
+        eval_loader = DataLoader(
+            self.validation_dataset if dataset == 'validation' else self.train_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=4
+        )
+
+        print()
+        num_classes = self.model.num_classes
+        hit_class_counts = np.zeros(shape=(num_classes,), dtype=np.int32)
+        total_class_counts = np.zeros(shape=(num_classes,), dtype=np.int32)
+        hit_class_score_sums = np.zeros(shape=(num_classes,), dtype=np.float32)
+        hit_unknown_count = 0
+        total_unknown_count = 0
+        hit_unknown_score_sum = 0.0
+        
+        with torch.no_grad():
+            for batch_x, batch_y in tqdm(eval_loader):
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                
+                y_pred = self.model(batch_x)[0] # (1, C) -> (C)
+                y_pred = y_pred.cpu().numpy()
+                batch_y = batch_y.cpu().numpy()[0]
+                
+                max_score_index = np.argmax(y_pred)
+                max_score = y_pred[max_score_index]
+                
+                if np.sum(batch_y) == 0.0:  # case unknown
+                    total_unknown_count += 1
+                    if max_score < unknown_threshold:
+                        hit_unknown_count += 1
+                        hit_unknown_score_sum += max_score
+                else:  # case classification
+                    true_class_index = np.argmax(batch_y)
+                    total_class_counts[true_class_index] += 1
+                    if max_score_index == true_class_index:
+                        if self.include_unknown:
+                            if max_score >= unknown_threshold:
+                                hit_class_counts[true_class_index] += 1
+                                hit_class_score_sums[true_class_index] += max_score
+                        else:
+                            hit_class_counts[true_class_index] += 1
+                            hit_class_score_sums[true_class_index] += max_score
+
+        total_acc_sum = 0.0
+        class_score_sum = 0.0
+        for i in range(len(total_class_counts)):
+            cur_class_acc = hit_class_counts[i] / (float(total_class_counts[i]) + 1e-5)
+            cur_class_score = hit_class_score_sums[i] / (float(hit_class_counts[i]) + 1e-5)
+            total_acc_sum += cur_class_acc
+            class_score_sum += cur_class_score
+            print(f'[class {i:2d}] acc : {cur_class_acc:.4f}, score : {cur_class_score:.4f}')
+
+        valid_class_count = num_classes
+        unknown_score = 0.0
+        if self.include_unknown and total_unknown_count > 0:
+            unknown_acc = hit_unknown_count / float(total_unknown_count + 1e-5)
+            unknown_score = hit_unknown_score_sum / float(hit_unknown_count + 1e-5)
+            total_acc_sum += unknown_acc
+            valid_class_count += 1
+            print(f'[class unknown] acc : {unknown_acc:.4f}, score : {unknown_score:.4f}')
+
+        class_acc = total_acc_sum / valid_class_count
+        class_score = class_score_sum / num_classes
+        if self.include_unknown:
+            print(f'total accuracy with unknown threshold({unknown_threshold:.2f}) : {class_acc:.4f}, class_score : {class_score:.4f}, unknown_score : {unknown_score:.4f}\n')
+        else:
+            print(f'total accuracy : {class_acc:.4f}, class_score : {class_score:.4f}\n')
+            
+        return class_acc, class_score, unknown_score
