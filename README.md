@@ -47,6 +47,7 @@ train_data/
 ```
 
 - If an `unknown` folder exists, images in that folder can be included as an 'unknown' class for training/evaluation.
+- Unique Feature: 'Unknown' Class Handling If an unknown folder exists in the dataset, images within it are used to train the model to output all zeros (e.g., [0, 0, ..., 0]). Unlike standard classifiers, the 'unknown' category does not increase the num_classes. Instead, the model learns to suppress activations for all known classes when encountering unknown data.
 
 ## Usage
 
