@@ -54,7 +54,8 @@ class SigmoidClassifier(CheckpointManager):
                  show_class_activation_map=False,
                  show_live_plot=False,
                  cam_activation_layer_name='cam_activation',
-                 last_conv_layer_name='squeeze_conv'):
+                 last_conv_layer_name='squeeze_conv',
+                 early_stopping_patience=10):
         super().__init__()
         self.input_shape = input_shape # (H, W, C)
         self.lr = lr
@@ -72,7 +73,13 @@ class SigmoidClassifier(CheckpointManager):
         self.cam_activation_layer_name = cam_activation_layer_name
         self.last_conv_layer_name = last_conv_layer_name
         self.checkpoint_interval = checkpoint_interval
+        self.early_stopping_patience = early_stopping_patience
         self.pretrained_iteration_count = 0
+        self.aug_brightness = aug_brightness
+        self.aug_contrast = aug_contrast
+        self.aug_rotate = aug_rotate
+        self.aug_h_flip = aug_h_flip
+        self.log_file = None
         warnings.filterwarnings(action='ignore')
         self.set_model_name(model_name)
         if self.checkpoint_interval == 0:
@@ -91,7 +98,7 @@ class SigmoidClassifier(CheckpointManager):
             print(f'no images in validation_image_path : {validation_image_path}')
             exit(0)
 
-        self.class_names = validation_class_names
+        self.class_names = train_class_names
         
         # Datasets
         self.train_dataset = CustomDataset(
@@ -128,6 +135,15 @@ class SigmoidClassifier(CheckpointManager):
 
     def hook(self, module, input, output):
         self.feature_map = output
+
+    def init_logger(self, path):
+        self.log_file = open(path, 'w')
+
+    def log(self, msg, end='\n'):
+        print(msg, end=end)
+        if self.log_file:
+            self.log_file.write(msg + end)
+            self.log_file.flush()
 
     def load_model(self, model_path):
         if os.path.exists(model_path) and os.path.isfile(model_path):
@@ -257,16 +273,34 @@ class SigmoidClassifier(CheckpointManager):
         
         self.model.train()
 
-    def print_loss(self, progress_str, loss):
-        print(f'\r{progress_str} loss => {loss:.4f}', end='')
+    def print_loss(self, progress_str, loss, val_loss=None):
+        if val_loss is not None and not np.isnan(val_loss):
+            self.log(f'\r{progress_str} loss => {loss:.4f}, val_loss => {val_loss:.4f}', end='')
+        else:
+            self.log(f'\r{progress_str} loss => {loss:.4f}', end='')
+
+    def compute_validation_loss(self, loss_function):
+        self.model.eval()
+        total_loss = 0.0
+        count = 0
+        with torch.no_grad():
+            for batch_x, batch_y in self.validation_loader:
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                y_pred = self.model(batch_x)
+                loss = loss_function(batch_y, y_pred)
+                total_loss += loss.item()
+                count += 1
+        self.model.train()
+        return total_loss / count if count > 0 else 0.0
 
     def train(self):
         if self.pretrained_iteration_count >= self.iterations:
-            print(f'pretrained iteration count {self.pretrained_iteration_count} is greater or equal than target iterations {self.iterations}')
+            self.log(f'pretrained iteration count {self.pretrained_iteration_count} is greater or equal than target iterations {self.iterations}')
             exit(0)
 
-        print(f'\ntrain on {len(self.train_image_paths)} samples')
-        print(f'validate on {len(self.validation_image_paths)} samples\n')
+        self.log(f'\ntrain on {len(self.train_image_paths)} samples')
+        self.log(f'validate on {len(self.validation_image_paths)} samples\n')
         
         # Optimizer
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr, betas=(self.momentum, 0.999))
@@ -278,17 +312,65 @@ class SigmoidClassifier(CheckpointManager):
         lr_scheduler = LRScheduler(lr=self.lr, lrf=self.lrf, iterations=self.iterations, warm_up=self.warm_up, policy=self.lr_policy)
         
         self.checkpoint_dir = self.init_checkpoint_dir()
+        self.init_logger(f'{self.checkpoint_dir}/train_log.txt')
+        
+        # Save class names
+        with open(f'{self.checkpoint_dir}/class_names.txt', 'w') as f:
+            for class_name in self.class_names:
+                f.write(f'{class_name}\n')
+        
+        self.log(f'\n{self.model_name}_config')
+        self.log(f'input_shape : {self.input_shape}')
+        self.log(f'lr : {self.lr}')
+        self.log(f'lrf : {self.lrf}')
+        self.log(f'alpha : {self.alpha}')
+        self.log(f'gamma : {self.gamma}')
+        self.log(f'warm_up : {self.warm_up}')
+        self.log(f'momentum : {self.momentum}')
+        self.log(f'batch_size : {self.batch_size}')
+        self.log(f'iterations : {self.iterations}')
+        self.log(f'label_smoothing : {self.label_smoothing}')
+        self.log(f'aug_brightness : {self.aug_brightness}')
+        self.log(f'aug_contrast : {self.aug_contrast}')
+        self.log(f'aug_rotate : {self.aug_rotate}')
+        self.log(f'aug_h_flip : {self.aug_h_flip}')
+        self.log(f'checkpoint_interval : {self.checkpoint_interval}')
+        self.log(f'early_stopping_patience : {self.early_stopping_patience}')
+        self.log(f'show_class_activation_map : {self.show_class_activation_map}')
+        self.log(f'show_live_plot : {self.show_live_plot}')
+        
         iteration_count = self.pretrained_iteration_count
         eta_calculator = ETACalculator(iterations=self.iterations, start_iteration=iteration_count)
         eta_calculator.start()
 
         if self.show_live_plot:
-            live_plot = LivePlot(iterations=self.iterations)
+            live_plot = LivePlot(iterations=self.iterations, legends=['train_loss', 'val_loss'])
         else:
-            live_plot = LivePlot(iterations=self.iterations, output_file=f'{self.checkpoint_dir}/loss_graph.png')
+            live_plot = LivePlot(iterations=self.iterations, legends=['train_loss', 'val_loss'], output_file=f'{self.checkpoint_dir}/loss_graph.png')
+        
+        
+        current_val_loss = np.nan
+        best_acc = 0.0
+        patience_count = 0
         
         self.model.train()
         
+        # Pre-fetch fixed validation batch for live plotting (use shuffle=True to get representative batch)
+        # We create a temporary loader just for this initialization
+        temp_val_loader = DataLoader(self.validation_dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
+        val_iter = iter(temp_val_loader)
+        try:
+            fixed_val_x, fixed_val_y = next(val_iter)
+        except StopIteration:
+            fixed_val_x, fixed_val_y = None, None
+            print("Warning: Validation dataset is empty.")
+        del temp_val_loader
+
+        if fixed_val_x is not None:
+            fixed_val_x = fixed_val_x.to(device)
+            fixed_val_y = fixed_val_y.to(device)
+
+        early_stopping_triggered = False
         while True:
             for batch_x, batch_y in self.train_loader:
                 if iteration_count >= self.iterations:
@@ -308,11 +390,19 @@ class SigmoidClassifier(CheckpointManager):
                 if self.show_class_activation_map and iteration_count % 100 == 0:
                     self.draw_cam(batch_x[0], batch_y[0])
                 
+                # Calculate validation loss for current batch (using fixed batch for speed)
+                if fixed_val_x is not None:
+                    with torch.no_grad():
+                        self.model.eval()
+                        val_pred = self.model(fixed_val_x)
+                        current_val_loss = loss_function(fixed_val_y, val_pred).item()
+                        self.model.train()
+
                 iteration_count += 1
                 progress_str = eta_calculator.update(iteration_count)
-                self.print_loss(progress_str, loss.item())
+                self.print_loss(progress_str, loss.item(), val_loss=current_val_loss)
                 
-                live_plot.update(loss.item())
+                live_plot.update(train_loss=loss.item(), val_loss=current_val_loss)
 
                 if iteration_count % 2000 == 0:
                     self.save_last_model(self.model.state_dict(), iteration_count)
@@ -323,10 +413,21 @@ class SigmoidClassifier(CheckpointManager):
                     content = f'_acc_{acc:.4f}_class_score_{class_score:.4f}'
                     if self.include_unknown:
                         content += f'_unknown_score_{unknown_score:.4f}'
-                    self.save_best_model(self.model.state_dict(), iteration_count, metric=acc, content=content)
+                    
+                    if acc > best_acc:
+                        best_acc = acc
+                        patience_count = 0
+                        self.save_best_model(self.model.state_dict(), iteration_count, metric=acc, content=content)
+                    else:
+                        patience_count += 1
+                        self.log(f'early stopping patience count : {patience_count}/{self.early_stopping_patience}')
+                        if patience_count >= self.early_stopping_patience:
+                            self.log(f'\nearly stopping triggered at iteration {iteration_count}')
+                            early_stopping_triggered = True
+                            break
             
-            if iteration_count >= self.iterations:
-                print('\ntrain end successfully')
+            if iteration_count >= self.iterations or early_stopping_triggered:
+                self.log('\ntrain end successfully')
                 break
 
     def evaluate(self, dataset='validation', unknown_threshold=0.5):
@@ -346,7 +447,7 @@ class SigmoidClassifier(CheckpointManager):
             num_workers=4
         )
 
-        print()
+        self.log(f'')
         num_classes = self.model.num_classes
         hit_class_counts = np.zeros(shape=(num_classes,), dtype=np.int32)
         total_class_counts = np.zeros(shape=(num_classes,), dtype=np.int32)
@@ -386,12 +487,14 @@ class SigmoidClassifier(CheckpointManager):
 
         total_acc_sum = 0.0
         class_score_sum = 0.0
+        
+        self.log(f'')
         for i in range(len(total_class_counts)):
             cur_class_acc = hit_class_counts[i] / (float(total_class_counts[i]) + 1e-5)
             cur_class_score = hit_class_score_sums[i] / (float(hit_class_counts[i]) + 1e-5)
             total_acc_sum += cur_class_acc
             class_score_sum += cur_class_score
-            print(f'[class {i:2d}] acc : {cur_class_acc:.4f}, score : {cur_class_score:.4f}')
+            self.log(f'[class {i:2d}] acc : {cur_class_acc:.4f}, score : {cur_class_score:.4f}')
 
         valid_class_count = num_classes
         unknown_score = 0.0
@@ -400,13 +503,13 @@ class SigmoidClassifier(CheckpointManager):
             unknown_score = hit_unknown_score_sum / float(hit_unknown_count + 1e-5)
             total_acc_sum += unknown_acc
             valid_class_count += 1
-            print(f'[class unknown] acc : {unknown_acc:.4f}, score : {unknown_score:.4f}')
+            self.log(f'[class unknown] acc : {unknown_acc:.4f}, score : {unknown_score:.4f}')
 
         class_acc = total_acc_sum / valid_class_count
         class_score = class_score_sum / num_classes
         if self.include_unknown:
-            print(f'total accuracy with unknown threshold({unknown_threshold:.2f}) : {class_acc:.4f}, class_score : {class_score:.4f}, unknown_score : {unknown_score:.4f}\n')
+            self.log(f'total accuracy with unknown threshold({unknown_threshold:.2f}) : {class_acc:.4f}, class_score : {class_score:.4f}, unknown_score : {unknown_score:.4f}\n')
         else:
-            print(f'total accuracy : {class_acc:.4f}, class_score : {class_score:.4f}\n')
+            self.log(f'total accuracy : {class_acc:.4f}, class_score : {class_score:.4f}\n')
             
         return class_acc, class_score, unknown_score

@@ -47,7 +47,8 @@ if __name__ == '__main__':
         aug_h_flip=False,
         checkpoint_interval=250,
         show_class_activation_map=False,
-        show_live_plot=False)
+        show_live_plot=False,
+        early_stopping_patience=10)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='', help='pretrained model path')

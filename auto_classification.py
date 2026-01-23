@@ -11,10 +11,15 @@ from tqdm import tqdm
 from model import Model
 
 # Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 
-g_save_with_score_dir = False
-g_unknown_threshold = 0.5
+
 
 
 def load_x_image_path(image_path, color_mode, input_size, input_shape):
@@ -36,7 +41,7 @@ def load_x_image_path(image_path, color_mode, input_size, input_shape):
     return torch.from_numpy(x), image_path
 
 
-def auto_classification(model_path, image_path, num_classes=1000, input_shape=(3, 64, 64)):
+def auto_classification(model_path, image_path, save_path, num_classes=1000, input_shape=(3, 64, 64), save_with_score=False, unknown_threshold=0.5):
     # Note: Model architecture needs to be known to instantiate Model class.
     # In TensorFlow metadata was saved in the h5, in PyTorch usually we need to know the args.
     # We will assume standard args or add them as parameters.
@@ -55,8 +60,6 @@ def auto_classification(model_path, image_path, num_classes=1000, input_shape=(3
     color_mode = cv2.IMREAD_GRAYSCALE if c == 1 else cv2.IMREAD_COLOR
     
     image_path = image_path.replace('\\', '/')
-    save_path = image_path
-
     image_paths = glob(f'{image_path}/*.jpg')
     pool = ThreadPoolExecutor(8)
     fs = []
@@ -68,7 +71,7 @@ def auto_classification(model_path, image_path, num_classes=1000, input_shape=(3
             x, img_path = f.result()
             x = x.to(device)
             y = model(x)[0]
-            y = torch.softmax(y, dim=0).cpu().numpy() # Add softmax if model output is logits (original used sigmoid, our model uses sigmoid)
+            # y = torch.softmax(y, dim=0).cpu().numpy() # Add softmax if model output is logits (original used sigmoid, our model uses sigmoid)
             # Wait, `model.py` uses sigmoid at the end. So outputs are already 0-1.
             # However `auto_classification` used `predict_on_batch` which returns model output.
             y = model(x)[0].cpu().numpy()
@@ -77,7 +80,7 @@ def auto_classification(model_path, image_path, num_classes=1000, input_shape=(3
             score = y[class_index]
             
             score_dir = ''
-            if g_save_with_score_dir:
+            if save_with_score:
                 score_dir = 'under_10'
                 if score > 0.9:
                     score_dir = 'over_90'
@@ -98,25 +101,43 @@ def auto_classification(model_path, image_path, num_classes=1000, input_shape=(3
                 elif score > 0.1:
                     score_dir = 'over_10'
 
-            if score < g_unknown_threshold:
+            if score < unknown_threshold:
                 save_dir = f'{save_path}/unknown'
-                if g_save_with_score_dir:
+                if save_with_score:
                     save_dir += f'/{score_dir}'
                 os.makedirs(save_dir, exist_ok=True)
-                sh.move(img_path, save_dir)
+                sh.copy2(img_path, save_dir)
             else:
                 save_dir = f'{save_path}/{class_index}'
-                if g_save_with_score_dir:
+                if save_with_score:
                     save_dir += f'/{score_dir}'
                 os.makedirs(save_dir, exist_ok=True)
-                sh.move(img_path, save_dir)
+                sh.copy2(img_path, save_dir)
 
 
 def main():
-    model_path = r'checkpoint/imagenet/best.pt'
-    img_path = r'/home/imagenet'
+    # model_path = r'checkpoint/imagenet/best.pt'
+    # model_path = r'results/train/hd_ir/best_5500_iter_acc_0.8020_class_score_0.7921_unknown_score_0.1329.pt'
+    model_path = r'results/train/hd_ir/last_10000_iter.pt'
+    img_path = r'./test_data/valid_fp'
+    # img_path = r'./train_data/ir/fp'
+    save_with_score = True
+    unknown_threshold = 0.5
+
+    # Create distinct results directory
+    input_basename = os.path.basename(img_path.rstrip('/\\'))
+    results_base = 'results/auto_classification'
+    os.makedirs(results_base, exist_ok=True)
+    
+    n = 0
+    while True:
+        save_path = os.path.join(results_base, f'{input_basename}_{n}')
+        if not os.path.exists(save_path):
+            break
+        n += 1
+    
     # These parameters need to match training
-    auto_classification(model_path, img_path, num_classes=1000, input_shape=(1, 64, 64))
+    auto_classification(model_path, img_path, save_path, num_classes=3, input_shape=(1, 64, 64), save_with_score=save_with_score, unknown_threshold=unknown_threshold)
 
 
 if __name__ == '__main__':

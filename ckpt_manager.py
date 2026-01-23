@@ -32,9 +32,9 @@ class CheckpointManager:
         inc = 0
         while True:
             if inc == 0:
-                new_checkpoint_path = f'checkpoint/{self.model_name}'
+                new_checkpoint_path = f'results/train/{self.model_name}'
             else:
-                new_checkpoint_path = f'checkpoint/{self.model_name}_{inc}'
+                new_checkpoint_path = f'results/train/{self.model_name}_{inc}'
             if os.path.exists(new_checkpoint_path) and os.path.isdir(new_checkpoint_path):
                 inc += 1
             else:
