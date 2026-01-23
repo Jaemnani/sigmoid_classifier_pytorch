@@ -1,6 +1,6 @@
 # Sigmoid Classifier (PyTorch)
 
-This repository is a PyTorch implementation of an image classifier based on the Sigmoid activation function. It includes features like Adaptive Cross Entropy Loss, ~~Class Activation Map (CAM) visualization, and Real-time Training Loss Plot~~.
+This repository is a PyTorch implementation of an image classifier based on the Sigmoid activation function. It includes features like Adaptive Cross Entropy Loss, ~~Class Activation Map (CAM) visualization~~, and Real-time Training Loss Plot.
 
 ## Features
 
@@ -9,7 +9,8 @@ This repository is a PyTorch implementation of an image classifier based on the 
 - **Label Smoothing**: Supports label smoothing to prevent overfitting.
 
 - ~~**CAM (Class Activation Map)**: Visualizes which parts of the image the model is focusing on (viewable during training).~~
-- ~~**Live Plot**: Visualizes training progress (Loss) in a real-time graph.~~
+- **Live Plot**: Visualizes training progress (Loss) in a real-time graph.
+- **Early Stopping**:  Automatically stops training if validation accuracy doesn't improve for a specified number of checks.
 - **Data Augmentation**: Robust data augmentation using the `albumentations` library.
 
 ## Installation
@@ -78,9 +79,13 @@ python train.py
 - `input_shape`: Input image dimensions (H, W, C). (e.g., 28x28 grayscale is (28, 28, 1))
 - `lr`: Learning Rate.
 - `iterations`: Total number of training iterations.
+- `warm_up`: Ratio of total iterations for learning rate warm-up.
+- `alpha`, `gamma`: Hyperparameters for Adaptive Cross Entropy Loss.
+- `aug_brightness`, `aug_contrast`, `aug_rotate`, `aug_h_flip`: Data augmentation parameters.
 - `checkpoint_interval`: Interval for saving models and evaluation.
+- `early_stopping_patience`: Number of evaluation intervals to wait for improvement before early stopping.
 - ~~`show_class_activation_map`: If set to `True`, displays CAM visualization window during training.~~
-- ~~`show_live_plot`: If set to `True`, displays Loss graph window during training.~~
+- `show_live_plot`: If set to `True`, displays Loss graph window during training.
 
 ### 2. Evaluation
 
