@@ -7,11 +7,11 @@ This repository is a PyTorch implementation of an image classifier based on the 
 - **PyTorch Implementation**: Ported from an existing framework to PyTorch.
 - **Adaptive Cross Entropy**: Adjusts loss function based on training difficulty.
 - **Label Smoothing**: Supports label smoothing to prevent overfitting.
-
-- ~~**CAM (Class Activation Map)**: Visualizes which parts of the image the model is focusing on (viewable during training).~~
-- **Live Plot**: Visualizes training progress (Loss) in a real-time graph.
-- **Early Stopping**:  Automatically stops training if validation accuracy doesn't improve for a specified number of checks.
-- **Data Augmentation**: Robust data augmentation using the `albumentations` library.
+- **Efficient Architecture**: Supports lightweight model architecture (Depthwise Separable Convolution).
+- **CAM (Class Activation Map)**: Visualizes which parts of the image the model is focusing on (viewable during training).
+- **Live Plot**: Visualizes training progress (Loss) in a real-time graph. Optimized with fixed validation batch for speed.
+- **Early Stopping**: Automatically stops training if validation accuracy doesn't improve for a specified number of checks.
+- **Data Augmentation**: Robust data augmentation using the `albumentations` library (includes CoarseDropout/Cutout).
 
 ## Installation
 
@@ -65,7 +65,10 @@ classifier = SigmoidClassifier(
     input_shape=(28, 28, 1), # (Height, Width, Channel)
     lr=0.001,
     batch_size=256,
-    iterations=1000,
+    iterations=10000,
+    architecture='original', # 'original' or 'efficient'
+    lr_policy='step', # 'step', 'step2', 'cosine', 'onecycle', 'constant'
+    early_stopping_patience=10, 
     ...
 )
 ```
@@ -78,13 +81,15 @@ python train.py
 **Key Parameters:**
 - `input_shape`: Input image dimensions (H, W, C). (e.g., 28x28 grayscale is (28, 28, 1))
 - `lr`: Learning Rate.
+- `lr_policy`: Learning rate scheduler approach ('step', 'step2', 'cosine', 'onecycle', 'constant').
+- `architecture`: Model architecture ('original' for standard Conv2D, 'efficient' for Depthwise Separable Conv).
 - `iterations`: Total number of training iterations.
 - `warm_up`: Ratio of total iterations for learning rate warm-up.
 - `alpha`, `gamma`: Hyperparameters for Adaptive Cross Entropy Loss.
 - `aug_brightness`, `aug_contrast`, `aug_rotate`, `aug_h_flip`: Data augmentation parameters.
 - `checkpoint_interval`: Interval for saving models and evaluation.
-- `early_stopping_patience`: Number of evaluation intervals to wait for improvement before early stopping.
-- ~~`show_class_activation_map`: If set to `True`, displays CAM visualization window during training.~~
+- `early_stopping_patience`: Number of evaluation intervals to wait for improvement before early stopping (0 to disable).
+- `show_class_activation_map`: If set to `True`, displays CAM visualization window during training.
 - `show_live_plot`: If set to `True`, displays Loss graph window during training.
 
 ### 2. Evaluation
@@ -103,10 +108,19 @@ You can automatically classify images in a folder using `auto_classification.py`
 ```python
 # Inside auto_classification.py
 def main():
-    model_path = 'checkpoint/mnist/best.pt'
+    model_path = 'results/train/mnist/best.pt'
     img_path = '/path/to/images'
-    # num_classes and input_shape must match training settings.
-    auto_classification(model_path, img_path, num_classes=1000, input_shape=(3, 64, 64))
+    # num_classes, input_shape, and architecture must match training settings.
+    auto_classification(
+        model_path, 
+        img_path, 
+        save_path, 
+        num_classes=10, 
+        input_shape=(1, 28, 28),
+        architecture='original',
+        save_with_score=False, 
+        unknown_threshold=0.5
+    )
 ```
 
 Run:
@@ -117,4 +131,5 @@ python auto_classification.py
 ## Notes
 
 - It automatically uses a CUDA-enabled GPU if available. For Mac, support for MPS (Metal Performance Shaders) is included in the code.
-- Training results (model checkpoints, graphs, etc.) are saved in the `checkpoint/` directory.
+- Training results (model checkpoints, graphs, etc.) are saved in the `results/train/` directory.
+- Auto classification uses multi-threading for faster image loading.

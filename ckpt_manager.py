@@ -73,6 +73,6 @@ class CheckpointManager:
             
             backup_path = f'{save_path}.bak'
             sh.copy(save_path, backup_path)
-            self.remove_best_model()
+            # self.remove_best_model() # Keep previous best models
             sh.move(backup_path, save_path)
         return save_path

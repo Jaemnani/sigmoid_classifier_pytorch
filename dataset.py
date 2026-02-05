@@ -19,14 +19,54 @@ class CustomDataset(Dataset):
             if aug_brightness > 0.0 or aug_contrast > 0.0:
                 aug_methods.append(A.RandomBrightnessContrast(p=0.5, brightness_limit=aug_brightness, contrast_limit=aug_contrast))
             if aug_rotate > 0:
-                aug_methods.append(A.Rotate(limit=aug_rotate, border_mode=0, value=0))
+                aug_methods.append(A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=aug_rotate, border_mode=0, value=0, p=0.5))
             if aug_h_flip:
                 aug_methods.append(A.HorizontalFlip(p=0.5))
+            
+            # Add Gaussian Noise for robustness
+            aug_methods.append(A.GaussNoise(var_limit=(10.0, 50.0), p=0.5))
+
             # GaussianBlur was present in original code
             aug_methods.append(A.GaussianBlur(p=0.5, blur_limit=(7, 7)))
+            # # Cutout (CoarseDropout) to improve robustness against unknown objects
+            aug_methods.append(A.CoarseDropout(max_holes=8, max_height=8, max_width=8, min_holes=4, min_height=4, min_width=4, fill_value=0, p=0.5))
             
         self.transform = A.Compose(aug_methods)
         self.augmentation = len(aug_methods) > 0
+
+    def letterbox(self, img, new_shape=(64, 64), color=(0, 0, 0)):
+        shape = img.shape[:2]  # current shape [height, width]
+        if isinstance(new_shape, int):
+            new_shape = (new_shape, new_shape)
+
+        # Scale ratio (new / old)
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+
+        # Compute padding
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        
+        # Ensure dimensions are at least 1x1
+        new_unpad = (max(1, new_unpad[0]), max(1, new_unpad[1]))
+        
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+
+        dw /= 2  # divide padding into 2 sides
+        dh /= 2
+
+        if shape[::-1] != new_unpad:  # resize
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        
+        # Handle grayscale value
+        if len(img.shape) == 2:
+             value = color[0] if isinstance(color, tuple) else color
+        else:
+             value = color
+             
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=value)
+        return img
 
     def __len__(self):
         return len(self.image_paths)
@@ -40,8 +80,8 @@ class CustomDataset(Dataset):
         img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE if is_gray else cv2.IMREAD_COLOR)
 
         # Preprocess
-        # Resize to (W, H) - cv2 uses (width, height)
-        img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
+        # Use letterbox to preserve aspect ratio
+        img = self.letterbox(img, new_shape=(self.input_shape[0], self.input_shape[1]))
         
         if self.augmentation:
             img = self.transform(image=img)['image']

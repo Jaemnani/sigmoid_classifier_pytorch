@@ -24,13 +24,10 @@ from sigmoid_classifier import SigmoidClassifier
 
 if __name__ == '__main__':
     classifier = SigmoidClassifier(
-        # train_image_path=r'/train_data/imagenet/train',
-        # validation_image_path=r'/train_data/imagenet/validation',
-        train_image_path=r'./train_data/mnist/train',
-        validation_image_path=r'./train_data/mnist/validation',
-        model_name='mnist',
-        # input_shape=(64, 64, 1), # (H, W, C) - same as before
-        input_shape=(28, 28, 1), # (H, W, C) - same as before
+        train_image_path=r'./train_data/ir/train_drop',
+        validation_image_path=r'./train_data/ir/valid_drop',
+        model_name='hd_ir',
+        input_shape=(96, 96, 1),
         lr=0.001,
         lrf=0.05,
         alpha=0.0,
@@ -38,17 +35,18 @@ if __name__ == '__main__':
         warm_up=0.1,
         momentum=0.9,
         batch_size=256,
-        # iterations=1000000,
-        iterations=1000,
+        iterations=100000,
         label_smoothing=0.1,
         aug_brightness=0.3,
         aug_contrast=0.3,
         aug_rotate=15,
         aug_h_flip=False,
-        checkpoint_interval=250,
+        lr_policy='step',
+        checkpoint_interval=0,
         show_class_activation_map=False,
         show_live_plot=False,
-        early_stopping_patience=10)
+        early_stopping_patience=0,
+        architecture='original')
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='', help='pretrained model path')

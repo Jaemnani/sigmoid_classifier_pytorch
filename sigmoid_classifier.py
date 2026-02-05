@@ -55,7 +55,8 @@ class SigmoidClassifier(CheckpointManager):
                  show_live_plot=False,
                  cam_activation_layer_name='cam_activation',
                  last_conv_layer_name='squeeze_conv',
-                 early_stopping_patience=10):
+                 early_stopping_patience=10,
+                 architecture='original'):
         super().__init__()
         self.input_shape = input_shape # (H, W, C)
         self.lr = lr
@@ -79,6 +80,7 @@ class SigmoidClassifier(CheckpointManager):
         self.aug_contrast = aug_contrast
         self.aug_rotate = aug_rotate
         self.aug_h_flip = aug_h_flip
+        self.architecture = architecture
         self.log_file = None
         warnings.filterwarnings(action='ignore')
         self.set_model_name(model_name)
@@ -91,6 +93,7 @@ class SigmoidClassifier(CheckpointManager):
         self.train_image_paths, train_class_names, _ = self.init_image_paths(train_image_path)
         self.validation_image_paths, validation_class_names, self.include_unknown = self.init_image_paths(validation_image_path)
         
+
         if len(self.train_image_paths) == 0:
             print(f'no images in train_image_path : {train_image_path}')
             exit(0)
@@ -122,14 +125,18 @@ class SigmoidClassifier(CheckpointManager):
         )
 
         # PyTorch DataLoaders
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        self.validation_loader = DataLoader(self.validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+        self.validation_loader = DataLoader(self.validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+
+        self.iterations_per_epoch = len(self.train_loader)
+        self.checkpoint_interval = self.iterations_per_epoch
+        print(f'Set checkpoint interval to 1 epoch : {self.checkpoint_interval} iterations')
         
         # Model
         # Input shape in model is expected as (C, H, W) mostly for internals, but constructor takes logic from original which used (H,W,C).
         # We'll pass (C, H, W) to model constructor just to be safe if it needs channel info 
         model_input_shape = (self.input_shape[2], self.input_shape[0], self.input_shape[1])
-        self.model = Model(input_shape=model_input_shape, num_classes=len(self.class_names)).to(device)
+        self.model = Model(input_shape=model_input_shape, num_classes=len(self.class_names), architecture=self.architecture).to(device)
         self.feature_map = None
         self.model.classifier_conv.register_forward_hook(self.hook)
 
@@ -421,7 +428,7 @@ class SigmoidClassifier(CheckpointManager):
                     else:
                         patience_count += 1
                         self.log(f'early stopping patience count : {patience_count}/{self.early_stopping_patience}')
-                        if patience_count >= self.early_stopping_patience:
+                        if self.early_stopping_patience > 0 and patience_count >= self.early_stopping_patience:
                             self.log(f'\nearly stopping triggered at iteration {iteration_count}')
                             early_stopping_triggered = True
                             break
