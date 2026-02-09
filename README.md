@@ -128,6 +128,41 @@ Run:
 python auto_classification.py
 ```
 
+### 4. Model Export
+
+You can convert trained PyTorch models (`.pt`) into ONNX and TensorRT engine formats to use them across different frameworks or deployment environments.
+
+#### PyTorch to ONNX
+
+Use the `pytorch_to_onnx.py` script to convert a PyTorch model to the ONNX format.
+
+```bash
+python pytorch_to_onnx.py --model_path results/last_model/best_xxxxx.pt --input_shape 1 96 96 --num_classes 3
+```
+
+- `--model_path`: Path to the PyTorch model file to be converted.
+- `--input_shape`: Input image size (C, H, W). (e.g., 1 96 96)
+- `--num_classes`: The number of classes.
+- `--architecture`: (Optional) Model architecture (`original` or `efficient`).
+
+#### ONNX to TensorRT
+
+Convert the ONNX model into a TensorRT engine (`.plan`). **This step must be performed within a Docker environment where TensorRT is installed (e.g., `orin_inference:r36.3.0`).**
+
+```bash
+# Execute inside the Docker container
+/usr/src/tensorrt/bin/trtexec \
+    --onnx=results/last_model/model.onnx \
+    --saveEngine=results/last_model/model.plan \
+    --fp16
+```
+
+- `--onnx`: Path to the input ONNX model.
+- `--saveEngine`: Path to save the generated TensorRT engine.
+- `--fp16`: (Optional) Use FP16 precision for optimization.
+
+> **Note:** For convenience, you can refer to the `onnx_to_tensorrt.sh` example script.
+
 ## Notes
 
 - It automatically uses a CUDA-enabled GPU if available. For Mac, support for MPS (Metal Performance Shaders) is included in the code.
